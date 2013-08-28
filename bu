@@ -1,0 +1,118 @@
+#!/usr/bin/env ruby
+
+require 'yaml'
+require 'active_support/core_ext/object/blank'
+require 'aws-sdk'
+
+class Backuper
+
+  class << self
+
+    def process(options)
+      command   = options.shift
+      command ||= 'backup'
+
+      new(options).send command
+    end
+
+  end
+
+  CURRENT_DIR = File.join(File.expand_path(__FILE__), '..')
+
+  def initialize(dirs)
+    @dirs = dirs
+    @dirs = [%x[pwd].chomp] if @dirs.blank?
+    @dirs = @dirs.map {|dir| File.expand_path(dir) }
+
+    AWS.config s3_config
+  end
+
+  def backup
+    puts "backing up #{@dirs}"
+
+    create_archive!
+    send_to_s3!
+    clear_old
+    remove_archive!
+  end
+
+  def list
+    puts "Objects in the bucket: #{bucket_name}"
+    puts bucket.objects.to_a.map(&:key).join "\n"
+  end
+
+  def delete
+    key = @dirs.first.split('/').last
+
+    puts "Deleting #{key} from the bucket: #{bucket_name}"
+    o = bucket.objects[key]
+
+    puts "key #{key} doesn't exist" and return unless o.exists?
+
+    o.delete
+  end
+
+  private
+
+    def clear_old
+      objects = bucket.objects
+
+      return if objects.to_a.size <= 10
+
+      old_objects = objects.to_a.first 5
+
+      old_objects.each do |o|
+        puts "Deleting old backup: #{o}"
+
+        o.delete
+      end
+    end
+
+    def send_to_s3!
+      puts "Uploading to S3"
+
+      o = bucket.objects[backup_name]
+      o.write :file => backup_full_path
+
+      puts "Uploaded to #{o.public_url}"
+    end
+
+    def bucket
+      @bucket ||= begin
+        s3  = AWS::S3.new
+        b   = s3.buckets.create bucket_name
+        b
+      end
+    end
+
+    def create_archive!
+      puts "Creating archive file: #{backup_full_path}"
+      %x[tar -pczf #{backup_full_path} #{@dirs.join(' ')}]
+    end
+
+    def remove_archive!
+      puts "Deleting archive file: #{backup_full_path}"
+      File.delete backup_full_path
+    end
+
+    def backup_full_path
+      @backup_full_path ||= File.expand_path "~/Downloads/#{backup_name}"
+    end
+
+    def backup_name
+      @backup_name ||= "backuper_#{Time.now.to_i}.tar.gz"
+    end
+
+    def bucket_name
+      s3_config['bucket']
+    end
+
+    def s3_config
+      @s3_config ||= YAML.load(File.open("#{CURRENT_DIR}/config.yml").read)['s3']
+    end
+
+  # /private
+
+end
+
+Backuper.process ARGV
